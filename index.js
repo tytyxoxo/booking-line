@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
 const https = require("https");
+const { URL } = require("url");
 
 const config = {
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -28,53 +29,102 @@ async function handleEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
   const text = event.message.text.trim();
 
-  const reply = await askClaude(text);
+  // ดูตารางว่าง
+  if (text === "ว่าง" || text === "ดูตารางว่าง") {
+    const reply = await callAppsScript({ action: "getSlots" });
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: "text", text: reply.text }],
+    });
+  }
 
+  // จองเวลา เช่น "จอง วันพฤหัส 15:00 ตัดผม"
+  if (text.startsWith("จอง ")) {
+    const parts = text.replace("จอง ", "").split(" ");
+    const dayText = parts[0];
+    const timeText = parts[1];
+    const title = parts.slice(2).join(" ") || "การจองผ่าน LINE";
+
+    if (!dayText || !timeText) {
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text: 'รูปแบบไม่ถูกต้องครับ\nเช่น "จอง วันพฤหัส 15:00 ตัดผม"',
+          },
+        ],
+      });
+    }
+
+    const reply = await callAppsScript({
+      action: "createBooking",
+      dayText,
+      timeText,
+      title,
+    });
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: "text", text: reply.text }],
+    });
+  }
+
+  // ข้อความทั่วไป
   return client.replyMessage({
     replyToken: event.replyToken,
-    messages: [{ type: "text", text: reply }],
+    messages: [
+      {
+        type: "text",
+        text: '📅 สวัสดีครับ!\n\nพิมพ์ "ว่าง" เพื่อดูตารางว่าง\nหรือ "จอง วัน เวลา ชื่อ" เพื่อจอง\nเช่น "จอง วันพฤหัส 15:00 ตัดผม"',
+      },
+    ],
   });
 }
 
-async function askClaude(userMessage) {
+// เรียก Google Apps Script พร้อม follow redirect
+function callAppsScript(body) {
   return new Promise((resolve) => {
-    const body = JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1000,
-      system: `คุณเป็น assistant ช่วยรับจอง ตอบเป็นภาษาไทยสั้นๆ
-วันนี้คือ ${new Date().toLocaleDateString("th-TH", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
-ถ้าผู้ใช้ถามดูตารางว่าง ให้บอกว่าว่างทุกช่วงเวลาในสัปดาห์นี้
-ถ้าผู้ใช้จอง เช่น "จอง วันพุธ 10:00" ให้ตอบยืนยันการจองและบอกรายละเอียด`,
-      messages: [{ role: "user", content: userMessage }],
-    });
+    const data = JSON.stringify(body);
 
-    const options = {
-      hostname: "api.anthropic.com",
-      path: "/v1/messages",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-    };
+    function doRequest(urlStr) {
+      const u = new URL(urlStr);
+      const options = {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(data),
+        },
+      };
 
-    const req = https.request(options, (res) => {
-      let raw = "";
-      res.on("data", (chunk) => (raw += chunk));
-      res.on("end", () => {
-        try {
-          const data = JSON.parse(raw);
-          resolve(data.content[0].text);
-        } catch {
-          resolve("เกิดข้อผิดพลาดครับ");
+      const req = https.request(options, (res) => {
+        // Apps Script redirect เสมอ ต้องตาม redirect
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          return doRequest(res.headers.location);
         }
-      });
-    });
 
-    req.on("error", () => resolve("เกิดข้อผิดพลาดครับ"));
-    req.write(body);
-    req.end();
+        let raw = "";
+        res.on("data", (chunk) => (raw += chunk));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(raw));
+          } catch {
+            resolve({ text: "เกิดข้อผิดพลาดครับ กรุณาลองใหม่" });
+          }
+        });
+      });
+
+      req.on("error", (err) => {
+        console.error("Apps Script error:", err.message);
+        resolve({ text: "เกิดข้อผิดพลาดครับ กรุณาลองใหม่" });
+      });
+
+      req.write(data);
+      req.end();
+    }
+
+    doRequest(process.env.APPS_SCRIPT_URL);
   });
 }
 
