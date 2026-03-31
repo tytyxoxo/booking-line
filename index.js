@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const line = require("@line/bot-sdk");
-const { google } = require("googleapis");
+const https = require("https");
 
 const config = {
   channelSecret: process.env.LINE_CHANNEL_SECRET,
@@ -11,61 +11,8 @@ const config = {
 const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
 });
-const auth = new google.auth.GoogleAuth({
-  credentials: {
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-  },
-  scopes: ["https://www.googleapis.com/auth/calendar"],
-});
-
-const calendar = google.calendar({ version: "v3", auth });
-const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 
 const app = express();
-const https = require("https");
-
-async function callAppsScript(body) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(process.env.APPS_SCRIPT_URL);
-    const data = JSON.stringify(body);
-    const options = {
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    };
-    const req = https.request(options, (res) => {
-      let raw = "";
-      res.on("data", (chunk) => (raw += chunk));
-      res.on("end", () => {
-        try {
-          resolve(JSON.parse(raw));
-        } catch {
-          resolve({ text: "เกิดข้อผิดพลาดครับ" });
-        }
-      });
-    });
-    req.on("error", reject);
-    req.write(data);
-    req.end();
-  });
-}
-
-async function getAvailableSlots() {
-  const res = await callAppsScript({ action: "getSlots" });
-  return res.text;
-}
-
-async function createBooking(text) {
-  const parts = text.replace("จอง ", "").split(" ");
-  const res = await callAppsScript({
-    action: "createBooking",
-    day: parts[0],
-    time: parts[1],
-  });
-  return res.text;
-}
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
@@ -81,121 +28,54 @@ async function handleEvent(event) {
   if (event.type !== "message" || event.message.type !== "text") return;
   const text = event.message.text.trim();
 
-  // ดูตารางว่าง
-  if (text === "ว่าง" || text === "ดูตารางว่าง") {
-    const slots = await getAvailableSlots();
-    return client.replyMessage({
-      replyToken: event.replyToken,
-      messages: [{ type: "text", text: slots }],
-    });
-  }
-
-  // จองเวลา เช่น "จอง วันพุธ 10:00"
-  if (text.startsWith("จอง ")) {
-    const result = await createBooking(text);
-    return client.replyMessage({
-      replyToken: event.replyToken,
-      messages: [{ type: "text", text: result }],
-    });
-  }
+  const reply = await askClaude(text);
 
   return client.replyMessage({
     replyToken: event.replyToken,
-    messages: [
-      {
-        type: "text",
-        text: 'พิมพ์ "ว่าง" เพื่อดูตารางว่าง\nหรือ "จอง วัน เวลา" เพื่อจองครับ\nเช่น "จอง วันพุธ 10:00"',
-      },
-    ],
+    messages: [{ type: "text", text: reply }],
   });
 }
 
-async function getAvailableSlots() {
-  try {
-    const now = new Date();
-    const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
-    const res = await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      timeMin: now.toISOString(),
-      timeMax: nextWeek.toISOString(),
-      singleEvents: true,
-      orderBy: "startTime",
-      timeZone: "Asia/Bangkok",
+async function askClaude(userMessage) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      system: `คุณเป็น assistant ช่วยรับจอง ตอบเป็นภาษาไทยสั้นๆ
+วันนี้คือ ${new Date().toLocaleDateString("th-TH", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+ถ้าผู้ใช้ถามดูตารางว่าง ให้บอกว่าว่างทุกช่วงเวลาในสัปดาห์นี้
+ถ้าผู้ใช้จอง เช่น "จอง วันพุธ 10:00" ให้ตอบยืนยันการจองและบอกรายละเอียด`,
+      messages: [{ role: "user", content: userMessage }],
     });
 
-    const events = res.data.items || [];
-
-    if (events.length === 0) {
-      return '📅 ไม่มีการจองในสัปดาห์นี้\nพิมพ์ "จอง วัน เวลา" เพื่อจองได้เลยครับ';
-    }
-
-    const list = events
-      .map((e) => {
-        const start = new Date(e.start.dateTime || e.start.date);
-        const end = new Date(e.end.dateTime || e.end.date);
-        return `• ${e.summary} (${start.toLocaleDateString("th-TH")} ${start.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}-${end.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })})`;
-      })
-      .join("\n");
-
-    return `📅 การจองสัปดาห์นี้\n\n${list}`;
-  } catch (err) {
-    console.error(err);
-    return "เกิดข้อผิดพลาด ไม่สามารถดูตารางได้ครับ";
-  }
-}
-
-async function createBooking(text) {
-  try {
-    // แยก "จอง วันพุธ 10:00" ออกมา
-    const parts = text.replace("จอง ", "").split(" ");
-    const dayText = parts[0];
-    const timeText = parts[1];
-
-    if (!dayText || !timeText) {
-      return 'รูปแบบไม่ถูกต้องครับ ลองใหม่ เช่น "จอง วันพุธ 10:00"';
-    }
-
-    // หาวันที่จากชื่อวัน
-    const dayMap = {
-      วันจันทร์: 1,
-      วันอังคาร: 2,
-      วันพุธ: 3,
-      วันพฤหัส: 4,
-      วันศุกร์: 5,
-      วันเสาร์: 6,
-      วันอาทิตย์: 0,
-    };
-    const targetDay = dayMap[dayText];
-
-    if (targetDay === undefined) {
-      return 'ไม่เข้าใจชื่อวันครับ เช่น "วันพุธ", "วันศุกร์"';
-    }
-
-    const now = new Date();
-    const diff = (targetDay - now.getDay() + 7) % 7 || 7;
-    const bookDate = new Date(now);
-    bookDate.setDate(now.getDate() + diff);
-
-    const [hour, minute] = timeText.split(":").map(Number);
-    bookDate.setHours(hour, minute, 0, 0);
-
-    const endDate = new Date(bookDate.getTime() + 60 * 60 * 1000); // 1 ชั่วโมง
-
-    await calendar.events.insert({
-      calendarId: CALENDAR_ID,
-      resource: {
-        summary: "📌 การจองผ่าน LINE",
-        start: { dateTime: bookDate.toISOString(), timeZone: "Asia/Bangkok" },
-        end: { dateTime: endDate.toISOString(), timeZone: "Asia/Bangkok" },
+    const options = {
+      hostname: "api.anthropic.com",
+      path: "/v1/messages",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
       },
+    };
+
+    const req = https.request(options, (res) => {
+      let raw = "";
+      res.on("data", (chunk) => (raw += chunk));
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(raw);
+          resolve(data.content[0].text);
+        } catch {
+          resolve("เกิดข้อผิดพลาดครับ");
+        }
+      });
     });
 
-    return `✅ จองสำเร็จแล้วครับ!\n📅 ${dayText} เวลา ${timeText}-${endDate.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}`;
-  } catch (err) {
-    console.error(err);
-    return "เกิดข้อผิดพลาด ไม่สามารถจองได้ครับ";
-  }
+    req.on("error", () => resolve("เกิดข้อผิดพลาดครับ"));
+    req.write(body);
+    req.end();
+  });
 }
 
 app.listen(process.env.PORT, () => {
