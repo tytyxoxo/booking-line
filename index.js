@@ -23,43 +23,48 @@ const calendar = google.calendar({ version: "v3", auth });
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 
 const app = express();
+const https = require("https");
+
+async function callAppsScript(body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(process.env.APPS_SCRIPT_URL);
+    const data = JSON.stringify(body);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    };
+    const req = https.request(options, (res) => {
+      let raw = "";
+      res.on("data", (chunk) => (raw += chunk));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(raw));
+        } catch {
+          resolve({ text: "เกิดข้อผิดพลาดครับ" });
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(data);
+    req.end();
+  });
+}
 
 async function getAvailableSlots() {
-  try {
-    const now = new Date();
-    const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const res = await callAppsScript({ action: "getSlots" });
+  return res.text;
+}
 
-    const authClient = await auth.getClient();
-    console.log("✅ auth สำเร็จ:", authClient.email);
-
-    const res = await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      timeMin: now.toISOString(),
-      timeMax: nextWeek.toISOString(),
-      singleEvents: true,
-      orderBy: "startTime",
-      timeZone: "Asia/Bangkok",
-    });
-
-    const events = res.data.items || [];
-
-    if (events.length === 0) {
-      return '📅 ไม่มีการจองในสัปดาห์นี้\nพิมพ์ "จอง วัน เวลา" เพื่อจองได้เลยครับ';
-    }
-
-    const list = events
-      .map((e) => {
-        const start = new Date(e.start.dateTime || e.start.date);
-        const end = new Date(e.end.dateTime || e.end.date);
-        return `• ${e.summary} (${start.toLocaleDateString("th-TH")} ${start.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}-${end.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })})`;
-      })
-      .join("\n");
-
-    return `📅 การจองสัปดาห์นี้\n\n${list}`;
-  } catch (err) {
-    console.error("❌ error:", err.message);
-    return `เกิดข้อผิดพลาด: ${err.message}`;
-  }
+async function createBooking(text) {
+  const parts = text.replace("จอง ", "").split(" ");
+  const res = await callAppsScript({
+    action: "createBooking",
+    day: parts[0],
+    time: parts[1],
+  });
+  return res.text;
 }
 
 app.post("/webhook", line.middleware(config), async (req, res) => {
