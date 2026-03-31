@@ -24,6 +24,44 @@ const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
 
 const app = express();
 
+async function getAvailableSlots() {
+  try {
+    const now = new Date();
+    const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    const authClient = await auth.getClient();
+    console.log("✅ auth สำเร็จ:", authClient.email);
+
+    const res = await calendar.events.list({
+      calendarId: CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: nextWeek.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+      timeZone: "Asia/Bangkok",
+    });
+
+    const events = res.data.items || [];
+
+    if (events.length === 0) {
+      return '📅 ไม่มีการจองในสัปดาห์นี้\nพิมพ์ "จอง วัน เวลา" เพื่อจองได้เลยครับ';
+    }
+
+    const list = events
+      .map((e) => {
+        const start = new Date(e.start.dateTime || e.start.date);
+        const end = new Date(e.end.dateTime || e.end.date);
+        return `• ${e.summary} (${start.toLocaleDateString("th-TH")} ${start.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}-${end.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })})`;
+      })
+      .join("\n");
+
+    return `📅 การจองสัปดาห์นี้\n\n${list}`;
+  } catch (err) {
+    console.error("❌ error:", err.message);
+    return `เกิดข้อผิดพลาด: ${err.message}`;
+  }
+}
+
 app.post("/webhook", line.middleware(config), async (req, res) => {
   try {
     await Promise.all(req.body.events.map(handleEvent));
