@@ -13,7 +13,6 @@ const client = new line.messagingApi.MessagingApiClient({
 });
 
 const app = express();
-app.use(express.json());
 
 // Webhook รับจาก LINE
 app.post("/webhook", line.middleware(config), async (req, res) => {
